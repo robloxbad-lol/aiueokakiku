@@ -2635,7 +2635,7 @@ end
 
 refreshVFXList()
 ---------------------------------
--- 🌊 Sea Beast / Sea Event (完全修正版：記憶ロジック徹底強化)
+-- 🌊 Sea Beast / Sea Event (障害物すり抜け・全機能搭載版)
 ---------------------------------
 local SeaTab = CreateTab("Sea Beast / Sea Event")
 
@@ -2652,7 +2652,7 @@ local SETTINGS = {
     DefaultY = 200,
     SeaBeastY = 50, 
     ShipY = 20,
-    MoveSpeed = 3.5,
+    MoveSpeed = 3.0,
     HuntTweenSpeed = 350,
     ReturnTweenSpeed = 250,
     BoatsPath = Workspace:WaitForChild("Boats"),
@@ -2664,13 +2664,10 @@ local State = {
     Hunting = false, Terror = false, Shark = false, 
     Piranha = false, Brigade = false, Fishman = false,
     Moving = false, Processing = false, LastSeat = nil,
-    LastBoatInstance = nil,
-    -- ここを確実に保存・更新する
     LastBoatName = "Sloop", 
     LastBoatType = false,
-    LastIsMarineModel = true,
     FixedShopPos = nil,
-    BuyingMode = false
+    LastIsMarineModel = true
 }
 
 -- --- ターゲット有効判定 ---
@@ -2702,39 +2699,35 @@ local function stableTween(targetPos, speed)
     while connection.Connected do task.wait() end
 end
 
--- --- 船購入ロジック (Stateへの保存を最優先) ---
-local function buyAndRideBoat(boatName, isLuxury, isMarineModel, findNewNpc)
-    State.BuyingMode = true
-    
-    -- 情報を即座に記憶
-    State.LastBoatName = boatName
-    State.LastBoatType = isLuxury
-    State.LastIsMarineModel = isMarineModel
-
+-- --- 船購入 & 乗船 ---
+local function buyAndRideBoat(boatName, isLuxury, isMarineModel)
     local dealerName = isLuxury and "Luxury Boat Dealer" or "Boat Dealer"
-    local root = player.Character:FindFirstChild("HumanoidRootPart")
-    if not root then State.BuyingMode = false return end
-
-    -- NPCの検索または記憶座標の読み込み
-    if findNewNpc or not State.FixedShopPos then
-        local closestDist = math.huge
-        local dealerModel = nil
+    local dealerModel = nil
+    
+    if State.FixedShopPos then
+        stableTween(State.FixedShopPos + Vector3.new(0, 5, 0), 400)
+        task.wait(0.5)
         for _, v in pairs(Workspace:GetDescendants()) do
             if v.Name == dealerName and v:IsA("Model") then
-                local npcPos = v:GetModelCFrame().p
-                local dist = (npcPos - root.Position).Magnitude
-                if dist < closestDist then
-                    closestDist = dist
+                if (v:GetModelCFrame().p - State.FixedShopPos).Magnitude < 30 then
                     dealerModel = v
+                    break
                 end
             end
         end
-        if dealerModel then 
-            State.FixedShopPos = dealerModel:GetModelCFrame().p 
-        end
     end
+    
+    if not dealerModel then
+        dealerModel = Workspace:FindFirstChild(dealerName, true)
+    end
+    
+    if dealerModel then
+        State.FixedShopPos = dealerModel:GetModelCFrame().p
+        State.LastBoatName = boatName
+        State.LastBoatType = isLuxury
+        State.LastIsMarineModel = isMarineModel
 
-    if State.FixedShopPos then
+        local root = player.Character:FindFirstChild("HumanoidRootPart")
         stableTween(State.FixedShopPos + Vector3.new(0, 5, 0), 350)
         task.wait(0.5)
         
@@ -2751,15 +2744,14 @@ local function buyAndRideBoat(boatName, isLuxury, isMarineModel, findNewNpc)
             if remote:InvokeServer("BuyBoat", n, dealerName) ~= 0 then
                 task.wait(1.2)
                 local targetBoat = nil
-                local boatDist = 999
+                local dist = 999
                 for _, b in pairs(SETTINGS.BoatsPath:GetChildren()) do
                     local m = b:FindFirstChildWhichIsA("BasePart", true)
-                    if m and (m.Position - root.Position).Magnitude < boatDist then
-                        boatDist = (m.Position - root.Position).Magnitude; targetBoat = b
+                    if m and (m.Position - root.Position).Magnitude < dist then
+                        dist = (m.Position - root.Position).Magnitude; targetBoat = b
                     end
                 end
                 if targetBoat then 
-                    State.LastBoatInstance = targetBoat
                     local seat = targetBoat:FindFirstChildWhichIsA("VehicleSeat", true)
                     if seat then 
                         State.LastSeat = seat
@@ -2772,11 +2764,9 @@ local function buyAndRideBoat(boatName, isLuxury, isMarineModel, findNewNpc)
             end
         end
     end
-    task.wait(1)
-    State.BuyingMode = false
 end
 
--- 武器・スキル・ターゲット・狩り (変更なし)
+-- --- 2キー装備 ---
 local function forceEquipWeapon()
     local char = player.Character
     local hum = char and char:FindFirstChild("Humanoid")
@@ -2793,6 +2783,7 @@ local function forceEquipWeapon()
     end
 end
 
+-- --- スキル連打 ---
 local function spamSkills()
     for _, key in ipairs({Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.F}) do
         VirtualInputManager:SendKeyEvent(true, key, false, game)
@@ -2801,6 +2792,7 @@ local function spamSkills()
     end
 end
 
+-- --- ターゲット検索 ---
 local function findNextTarget()
     local enm = SETTINGS.EnemiesPath:GetChildren()
     if State.Terror then for _,v in pairs(enm) do if v.Name == "Terrorshark" and isValid(v) then return v, true, SETTINGS.DefaultY end end end
@@ -2812,17 +2804,22 @@ local function findNextTarget()
     return nil
 end
 
+-- --- 狩りプロセス ---
 local function startHunt()
     if State.Processing then return end
     local target, isDirect, currentY = findNextTarget()
     if not target then return end
+
     State.Processing = true
     forceEquipWeapon()
+
     while true do
         target, isDirect, currentY = findNextTarget()
         if not target then break end
+
         local root = player.Character:FindFirstChild("HumanoidRootPart")
         local trp = target:FindFirstChild("HumanoidRootPart") or target:FindFirstChildWhichIsA("BasePart", true)
+
         if trp then
             stableTween(trp.Position + (isDirect and Vector3.new(0, 15, 0) or Vector3.new(0, currentY - trp.Position.Y, 0)), SETTINGS.HuntTweenSpeed)
             while isValid(target) and (State.Hunting or State.Terror or State.Shark or State.Piranha or State.Brigade or State.Fishman) do
@@ -2835,6 +2832,7 @@ local function startHunt()
         end
         task.wait(0.2)
     end
+    
     if State.LastSeat and State.LastSeat.Parent then 
         stableTween(State.LastSeat.Position + Vector3.new(0, 3, 0), SETTINGS.ReturnTweenSpeed)
         task.wait(0.3)
@@ -2843,13 +2841,12 @@ local function startHunt()
     State.Processing = false
 end
 
--- 自動復帰 (記憶した情報を使用)
+-- --- 死んだ時の自動復帰 ---
 player.CharacterAdded:Connect(function(char)
-    State.BuyingMode = true
     task.wait(4)
-    if not State.Moving then State.BuyingMode = false return end
-    -- 保存された State.LastBoatName 等を使用して同じ店(FixedShopPos)へ
-    buyAndRideBoat(State.LastBoatName, State.LastBoatType, State.LastIsMarineModel, false)
+    if State.Moving and State.FixedShopPos then
+        buyAndRideBoat(State.LastBoatName, State.LastBoatType, State.LastIsMarineModel)
+    end
 end)
 
 -- --- UI ---
@@ -2875,7 +2872,7 @@ CreateButton(SeaTab, "RETURN TO BOAT", function()
     end
 end)
 
--- SHOP
+-- --- BOAT SHOP ---
 do
     local boats = {
         {"Dinghy", false}, {"Sloop", true}, {"Brigade", true}, {"Grand Brigade", true},
@@ -2883,20 +2880,23 @@ do
     }
     for _, info in ipairs(boats) do
         CreateButton(SeaTab, "Buy & Start: "..info[1], function()
-            buyAndRideBoat(info[1], info[3] or false, info[2], true)
+            buyAndRideBoat(info[1], info[3] or false, info[2])
         end)
     end
 end
 
--- 常駐処理
+-- --- 常駐ループ (Noclip機能追加) ---
 RunService.Stepped:Connect(function()
+    -- AUTO MOVE 中かつ船に乗っているなら当たり判定を消す
     if State.Moving and State.LastSeat and State.LastSeat.Parent then
         local boat = State.LastSeat.Parent
+        -- プレイヤーの当たり判定オフ
         if player.Character then
             for _, part in pairs(player.Character:GetDescendants()) do
                 if part:IsA("BasePart") then part.CanCollide = false end
             end
         end
+        -- 船の当たり判定オフ
         for _, part in pairs(boat:GetDescendants()) do
             if part:IsA("BasePart") then part.CanCollide = false end
         end
@@ -2908,21 +2908,18 @@ RunService.Heartbeat:Connect(function()
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChild("Humanoid")
     if not (root and hum) then return end
-    if State.Moving and not State.BuyingMode and hum.Health > 0 and State.LastBoatInstance and not State.LastBoatInstance.Parent then
-        State.LastBoatInstance = nil
-        hum.Health = 0 
-        return
-    end
+
     if hum.SeatPart and hum.SeatPart:IsA("VehicleSeat") then
         State.LastSeat = hum.SeatPart
-        State.LastBoatInstance = hum.SeatPart.Parent
-        State.BuyingMode = false
     end
+
+    -- AUTO MOVE 移動
     if State.Moving and not State.Processing and State.LastSeat and hum.Sit then
         local fwd = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z).Unit
         root.CFrame = CFrame.new(root.Position + (fwd * SETTINGS.MoveSpeed), root.Position + (fwd * SETTINGS.MoveSpeed) + root.CFrame.LookVector)
         root.CFrame = CFrame.new(root.Position.X, SETTINGS.DefaultY, root.Position.Z) * (root.CFrame - root.CFrame.Position)
     end
+
     if not State.Processing and findNextTarget() then
         task.spawn(startHunt)
     end
