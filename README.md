@@ -292,7 +292,7 @@ end)
 local aiming = false
 local camera = workspace.CurrentCamera
 
-CreateToggle(MainTab, "オートエイム", settings.AutoAim, function(state)
+CreateToggle(MainTab, "オートエイム（カメラロック）", settings.AutoAim, function(state)
     settings.AutoAim = state
 end)
 
@@ -349,7 +349,7 @@ fovCircle.Transparency = 0.5
 fovCircle.Visible = false
 fovCircle.Filled = false
 
-CreateToggle(MainTab, "オートエイム（FOV）", settings.FovAim, function(state)
+CreateToggle(MainTab, "オートエイム（FOVカメラ）", settings.FovAim, function(state)
     settings.FovAim = state
     fovCircle.Visible = state
 end)
@@ -399,6 +399,343 @@ game:GetService("RunService").RenderStepped:Connect(function()
         end
     end
 end)
+do ---------------------------------
+-- Mainタブ：Silent Aim (高精度スキャン版)
+---------------------------------
+local Players = game:GetService("Players")
+local Mouse = player:GetMouse()
+
+-- 設定に追加
+settings.SilentAim = false
+local aimDist = 1000
+local targetPartName = "HumanoidRootPart"
+local scanRate = 0.01
+
+local targetPlayerName = nil
+local targetPosition = nil
+
+-- 【高精度スキャン】最も近い敵をロック
+task.spawn(function()
+    while true do
+        if settings.SilentAim then
+            local closest = nil
+            local shortestDist = aimDist
+            local myChar = player.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            
+            if myRoot then
+                for _, p in pairs(Players:GetPlayers()) do
+                    if p ~= player and p.Character then
+                        local tPart = p.Character:FindFirstChild(targetPartName)
+                        local hum = p.Character:FindFirstChild("Humanoid")
+                        
+                        -- 生存確認と距離チェック
+                        if tPart and hum and hum.Health > 0 then
+                            local mag = (tPart.Position - myRoot.Position).Magnitude
+                            if mag < shortestDist then
+                                shortestDist = mag
+                                closest = p
+                            end
+                        end
+                    end
+                end
+            end
+            
+            -- ターゲット情報の更新
+            if closest then
+                targetPlayerName = closest.Name
+                targetPosition = closest.Character[targetPartName].Position
+            else
+                targetPlayerName = nil
+                targetPosition = nil
+            end
+        end
+        task.wait(scanRate)
+    end
+end)
+
+-- 【メタテーブル・フック】通信データのすり替え
+local mt = getrawmetatable(game)
+local oldIndex = mt.__index
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+
+-- マウス位置の偽装 (indexフック)
+mt.__index = newcclosure(function(self, index)
+    if settings.SilentAim and not checkcaller() and targetPlayerName and targetPosition then
+        if self == Mouse and (index == "Hit" or index == "Target") then
+            if index == "Hit" then
+                return CFrame.new(targetPosition)
+            else
+                return Players[targetPlayerName].Character[targetPartName]
+            end
+        end
+    end
+    return oldIndex(self, index)
+end)
+
+-- サーバー通信の偽装 (namecallフック)
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if settings.SilentAim and not checkcaller() and (method == "FireServer" or method == "InvokeServer") and targetPosition then
+        local name = self.Name:lower()
+        -- バグ防止のためUI系は除外
+        if not name:find("gui") and not name:find("weather") and not name:find("hud") then
+            for i, v in ipairs(args) do
+                if typeof(v) == "Vector3" then
+                    args[i] = targetPosition
+                elseif typeof(v) == "CFrame" then
+                    local myChar = player.Character
+                    if myChar and myChar:FindFirstChild("HumanoidRootPart") then
+                        args[i] = CFrame.new(myChar.HumanoidRootPart.Position, targetPosition)
+                    end
+                end
+            end
+        end
+    end
+    return oldNamecall(self, unpack(args))
+end)
+
+setreadonly(mt, true)
+
+-- Mainタブにトグルを追加
+if MainTab then
+    CreateToggle(MainTab, "Silent Aim (サイレントエイム)", settings.SilentAim, function(v)
+        settings.SilentAim = v
+        if v then
+            Notify("Silent Aim 有効 (全攻撃必中)")
+        else
+            Notify("Silent Aim 無効")
+        end
+    end)
+end
+do ---------------------------------
+-- Mainタブ：Silent Aim (チームチェック・高精度版)
+---------------------------------
+local Players = game:GetService("Players")
+local Mouse = player:GetMouse()
+
+-- 設定に追加
+settings.SilentAim = false
+local aimDist = 1000
+local targetPartName = "HumanoidRootPart"
+local scanRate = 0.01
+
+local targetPlayerName = nil
+local targetPosition = nil
+
+-- 【高精度スキャン】味方を除外して敵だけをロック
+task.spawn(function()
+    while true do
+        if settings.SilentAim then
+            local closest = nil
+            local shortestDist = aimDist
+            local myChar = player.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            
+            if myRoot then
+                for _, p in pairs(Players:GetPlayers()) do
+                    -- 自分以外、かつチームが異なるプレイヤーのみをターゲットにする
+                    if p ~= player and p.Character and p.Team ~= player.Team then
+                        local tPart = p.Character:FindFirstChild(targetPartName)
+                        local hum = p.Character:FindFirstChild("Humanoid")
+                        
+                        -- 生存確認
+                        if tPart and hum and hum.Health > 0 then
+                            local mag = (tPart.Position - myRoot.Position).Magnitude
+                            if mag < shortestDist then
+                                shortestDist = mag
+                                closest = p
+                            end
+                        end
+                    end
+                end
+            end
+            
+            -- ターゲット情報の更新
+            if closest then
+                targetPlayerName = closest.Name
+                targetPosition = closest.Character[targetPartName].Position
+            else
+                targetPlayerName = nil
+                targetPosition = nil
+            end
+        end
+        task.wait(scanRate)
+    end
+end)
+
+-- 【メタテーブル・フック】通信データのすり替え（サイレント）
+local mt = getrawmetatable(game)
+local oldIndex = mt.__index
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+
+-- マウス位置の偽装
+mt.__index = newcclosure(function(self, index)
+    if settings.SilentAim and not checkcaller() and targetPlayerName and targetPosition then
+        if self == Mouse and (index == "Hit" or index == "Target") then
+            if index == "Hit" then
+                return CFrame.new(targetPosition)
+            else
+                return Players[targetPlayerName].Character[targetPartName]
+            end
+        end
+    end
+    return oldIndex(self, index)
+end)
+
+-- サーバー通信の偽装（スキル・銃・必殺技）
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if settings.SilentAim and not checkcaller() and (method == "FireServer" or method == "InvokeServer") and targetPosition then
+        local name = self.Name:lower()
+        -- GUIや演出系の通信を除外してバグを防ぐ
+        if not name:find("gui") and not name:find("weather") and not name:find("hud") then
+            for i, v in ipairs(args) do
+                if typeof(v) == "Vector3" then
+                    args[i] = targetPosition
+                elseif typeof(v) == "CFrame" then
+                    -- 自分の位置から敵を向いたCFrameを作成
+                    if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                        args[i] = CFrame.new(player.Character.HumanoidRootPart.Position, targetPosition)
+                    end
+                end
+            end
+        end
+    end
+    return oldNamecall(self, unpack(args))
+end)
+
+setreadonly(mt, true)
+
+-- Mainタブにトグルを追加（既存のものがあれば上書き）
+if MainTab then
+    CreateToggle(MainTab, "Silent Aim (チームチェック)", settings.SilentAim, function(v)
+        settings.SilentAim = v
+        if v then
+            Notify("Silent Aim 有効 (敵のみロックオン)")
+        else
+            Notify("Silent Aim 無効")
+        end
+    end)
+end
+do ---------------------------------
+-- BloxFruitsタブ：NPC専用 Silent Aim (超軽量ファーム版)
+---------------------------------
+local Workspace = game:GetService("Workspace")
+local Mouse = player:GetMouse()
+
+-- 設定に追加
+settings.NPCSilentAim = false
+local npcDist = 1000
+local npcTargetPart = "HumanoidRootPart"
+local npcScanRate = 0.01
+
+-- ターゲットフォルダ定義
+local EnemyFolder = Workspace:FindFirstChild("Enemies")
+
+local TargetNPC = nil
+local TargetNPCPosition = nil
+
+-- 【超軽量スキャン】Enemiesフォルダの中身だけを高速チェック
+task.spawn(function()
+    while true do
+        if settings.NPCSilentAim then
+            local closest = nil
+            local shortestDist = npcDist
+            local myChar = player.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            
+            if myRoot and EnemyFolder then
+                for _, obj in pairs(EnemyFolder:GetChildren()) do
+                    local hum = obj:FindFirstChildOfClass("Humanoid")
+                    local tPart = obj:FindFirstChild(npcTargetPart)
+                    
+                    if hum and tPart and hum.Health > 0 then
+                        local mag = (tPart.Position - myRoot.Position).Magnitude
+                        if mag < shortestDist then
+                            shortestDist = mag
+                            closest = obj
+                        end
+                    end
+                end
+            end
+            
+            -- ターゲット確定
+            if closest then
+                TargetNPC = closest
+                TargetNPCPosition = closest[npcTargetPart].Position
+            else
+                TargetNPC = nil
+                TargetNPCPosition = nil
+            end
+        end
+        task.wait(npcScanRate)
+    end
+end)
+
+-- 【メタテーブル・フック】NPC用エイムの適用
+-- (※MainタブのSilent Aimと干渉しないように論理和で判定)
+local mt = getrawmetatable(game)
+local oldIndex = mt.__index
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+
+mt.__index = newcclosure(function(self, index)
+    if not checkcaller() then
+        -- NPCエイムがONかつターゲットがいる場合
+        if settings.NPCSilentAim and TargetNPCPosition then
+            if self == Mouse and (index == "Hit" or index == "Target") then
+                if index == "Hit" then return CFrame.new(TargetNPCPosition) end
+                if index == "Target" then return TargetNPC[npcTargetPart] end
+            end
+        end
+    end
+    return oldIndex(self, index)
+end)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local args = {...}
+    
+    if not checkcaller() and (method == "FireServer" or method == "InvokeServer") then
+        -- NPCエイム適用時
+        if settings.NPCSilentAim and TargetNPCPosition then
+            local name = self.Name:lower()
+            if not name:find("gui") and not name:find("weather") and not name:find("hud") then
+                for i, v in ipairs(args) do
+                    if typeof(v) == "Vector3" then
+                        args[i] = TargetNPCPosition
+                    elseif typeof(v) == "CFrame" then
+                        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                            args[i] = CFrame.new(player.Character.HumanoidRootPart.Position, TargetNPCPosition)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return oldNamecall(self, unpack(args))
+end)
+
+setreadonly(mt, true)
+
+-- BloxFruitsタブにトグルを追加
+if BloxFruitsTab then
+    CreateToggle(BloxFruitsTab, "NPC Silent Aim (Farm用)", settings.NPCSilentAim, function(v)
+        settings.NPCSilentAim = v
+        if v then
+            Notify("NPC Silent Aim 有効 (ファーム特化)")
+        else
+            Notify("NPC Silent Aim 無効")
+        end
+    end)
+end
 ---------------------------------
 -- 🚀 Mainタブ：ダメージ無効化
 ---------------------------------
@@ -1172,7 +1509,7 @@ CreateButton(MainTab, "RTX", function()
     ApplyZenithRTX_V2()
 end)
 ---------------------------------
--- 👁️ Mainタブ：詳細プレイヤーESP (InCombat 0含み判定版)
+-- 👁️ Mainタブ：詳細プレイヤーESP (戦闘中判定・最優先版)
 ---------------------------------
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -1230,11 +1567,11 @@ local function CreateESP(plr)
     end
     _G.ESPObjects[plr] = {
         Line = Drawing.new("Line"),
-        NameText = NewText(16, Color3.new(1, 1, 1)),
-        PvpText = NewText(14, Color3.new(1, 1, 1)),
-        KenText = NewText(14, Color3.new(1, 0, 1)),
-        StatText = NewText(13, Color3.new(1, 0.8, 0)),
-        HPText = NewText(13, Color3.new(0, 1, 0))
+        NameText = NewText(16, Color3.new(1, 1, 1)),      -- 名前：白
+        PvpText = NewText(14, Color3.new(1, 1, 1)),       -- PvP/Combat：可変
+        KenText = NewText(14, Color3.new(1, 0, 1)),       -- 見聞：紫
+        StatText = NewText(13, Color3.new(1, 0.8, 0)),    -- 賞金：黄
+        HPText = NewText(13, Color3.new(0, 1, 0))         -- HP：緑
     }
 end
 
@@ -1263,10 +1600,10 @@ _G.ESPConnection = RunService.RenderStepped:Connect(function()
                 local stats = plr:FindFirstChild("leaderstats")
                 local bounty = stats and stats:FindFirstChild("Bounty/Honor")
 
-                -- --- InCombat判定 (0以上の数値であれば有効) ---
+                -- --- InCombat判定ロジック ---
                 local combatVal = char:GetAttribute("InCombat") or (char:FindFirstChild("InCombat") and char:FindFirstChild("InCombat").Value)
-                local isInCombat = type(combatVal) == "number" and combatVal >= 0 
-                -- ------------------------------------------
+                local isInCombat = type(combatVal) == "number" and combatVal > 0
+                -- ---------------------------
 
                 -- 描画：線
                 objs.Line.From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
@@ -1281,11 +1618,11 @@ _G.ESPConnection = RunService.RenderStepped:Connect(function()
                 -- 2. PvP & 状態 (戦闘中を最優先)
                 local info = ""
                 if isInCombat then
-                    -- 0以上の数値がある時：強制的に戦闘中表示
+                    -- 戦闘中の場合：セーフゾーン無視、赤文字
                     info = "PvP: ON (InCombat)"
                     objs.PvpText.Color = Color3.new(1, 0, 0) -- 赤
                 elseif inSafe then
-                    -- 戦闘中でなくセーフゾーンにいる時
+                    -- セーフゾーン：水色
                     info = (pvpOff and "PvP: OFF" or "PvP: ON") .. " (SAFE)"
                     objs.PvpText.Color = Color3.new(0, 1, 1) -- 水色
                 else
@@ -1320,8 +1657,9 @@ _G.ESPConnection = RunService.RenderStepped:Connect(function()
     end
 end)
 
--- --- UI設定 ---
-CreateToggle(MainTab, "Detailed ESP", false, function(state)
+-- --- UI統合 (トグル設定) ---
+-- お使いのUIライブラリに合わせて "CreateToggle(MainTab..." の部分は適宜調整してください
+CreateToggle(MainTab, "ESP (Detailed)", false, function(state)
     _G.ESPEnabled = state
 end)
 ---------------------------------
@@ -1682,6 +2020,115 @@ if BloxFruitsTab then
             Notify("Extreme M1 有効 )")
         else
             Notify("Extreme M1 無効")
+        end
+    end)
+end
+---------------------------------
+-- BloxFruitsタブ：Skull Guitar Auto TAP (Player + NPC 対応版)
+---------------------------------
+local LP = game:GetService("Players").LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- 設定初期化
+settings.SoulGuitarAuto = false
+
+-- リモート取得
+local GunValidator = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Validator2")
+
+-- GCからValidator用関数を特定 (検知回避)
+local old_shoot
+for _, v in pairs(getgc(true)) do
+    if type(v) == "table" and rawget(v, "Attack") and type(v.Attack) == "function" then
+        local s, val = pcall(getupvalue, v.Attack, 9)
+        if s then old_shoot = val; break end
+    end
+end
+
+-- ターゲット取得 (プレイヤー優先、次にNPC)
+local function GetSkullTargetAll()
+    local char = LP.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    local myRoot = char.HumanoidRootPart
+    local nearest = nil
+    local minDist = 1000 -- 射程距離
+
+    -- Characters (プレイヤー) と Enemies (NPC) の両方をスキャン
+    local folders = {workspace:FindFirstChild("Characters"), workspace:FindFirstChild("Enemies")}
+
+    for _, folder in pairs(folders) do
+        if folder then
+            for _, obj in pairs(folder:GetChildren()) do
+                if obj ~= char then
+                    local hum = obj:FindFirstChild("Humanoid")
+                    local root = obj:FindFirstChild("HumanoidRootPart")
+                    if hum and root and hum.Health > 0 then
+                        local d = (myRoot.Position - root.Position).Magnitude
+                        if d < minDist then
+                            minDist = d
+                            nearest = root
+                        end
+                    end
+                end
+            end
+        end
+    end
+    -- ターゲットがいればその座標、いなければ正面30スタッドを返す
+    return nearest and nearest.Position or (myRoot.CFrame * CFrame.new(0, 0, -30)).Position
+end
+
+-- ツール取得
+local function GetSkullTool()
+    local h = LP.Character:FindFirstChild("Skull Guitar")
+    if h then return h end
+    for _, t in pairs(LP.Backpack:GetChildren()) do
+        if t.Name == "Skull Guitar" then return t end
+    end
+    return nil
+end
+
+-- メイン実行ロジック
+local function ExecuteSkullAll()
+    if not settings.SoulGuitarAuto then return end
+    
+    local skull = GetSkullTool()
+    if not skull or not skull:FindFirstChild("RemoteEvent") then return end
+    
+    local pos = GetSkullTargetAll()
+    if not pos then return end
+
+    pcall(function()
+        -- Validator計算と送信 (検知回避)
+        if old_shoot then
+            local v1, v2, v3, v4, v5, v6, v7 = getupvalue(old_shoot, 15), getupvalue(old_shoot, 13), getupvalue(old_shoot, 16), getupvalue(old_shoot, 17), getupvalue(old_shoot, 14), getupvalue(old_shoot, 12), getupvalue(old_shoot, 18)
+            local v9 = (v5 * v2 + v6 * v1) % v3
+            v9 = (v9 * v3 + (v6 * v2)) % v4
+            v5, v6, v7 = math.floor(v9/v3), v9-(math.floor(v9/v3)*v3), v7+1
+            setupvalue(old_shoot, 15, v1); setupvalue(old_shoot, 13, v2); setupvalue(old_shoot, 16, v3); setupvalue(old_shoot, 17, v4); setupvalue(old_shoot, 14, v5); setupvalue(old_shoot, 12, v6); setupvalue(old_shoot, 18, v7)
+            GunValidator:FireServer(math.floor(v9/v4 * 16777215), v7)
+        end
+        -- 攻撃送信
+        skull.RemoteEvent:FireServer("TAP", pos)
+    end)
+end
+
+-- 超速ループ (0.01秒)
+task.spawn(function()
+    while true do
+        if settings.SoulGuitarAuto then
+            ExecuteSkullAll()
+        end
+        task.wait(0.01)
+    end
+end)
+
+-- 既存の「BloxFruitsTab」にトグルを追加
+if BloxFruitsTab then
+    CreateToggle(BloxFruitsTab, "Skull Guitar (All-Target)", settings.SoulGuitarAuto, function(v)
+        settings.SoulGuitarAuto = v
+        if v then
+            Notify("Skull Guitar: 全対象・常時連射 ON")
+        else
+            Notify("Skull Guitar: OFF")
         end
     end)
 end
@@ -2922,146 +3369,6 @@ RunService.Heartbeat:Connect(function()
 
     if not State.Processing and findNextTarget() then
         task.spawn(startHunt)
-    end
-end)
--- -------------------------------------------------
--- 🐉 Leviathan & Frozen Heart 追加モジュール (完成版)
--- -------------------------------------------------
-
--- 初期Stateのリセット (起動時に詰まりを防止)
-State.AutoLeviathan = false
-State.KillLeviathan = false
-State.GetFrozenHeart = false
-State.Processing = false -- 最初は必ず false
-
--- UIトグルの作成 (ここはお前のコードのまま)
-CreateToggle(SeaTab, "AUTO FIND LEVIATHAN (GATE)", false, function(v) State.AutoLeviathan = v end)
-CreateToggle(SeaTab, "AUTO KILL LEVIATHAN", false, function(v) State.KillLeviathan = v end)
-CreateToggle(SeaTab, "AUTO GET FROZEN HEART", false, function(v) State.GetFrozenHeart = v end)
-
--- ターゲットロジック
-local function getLeviathanTarget()
-    if not State.KillLeviathan then return nil end
-    local path = SETTINGS.SeaBeastsPath or workspace:FindFirstChild("Enemies")
-    if not path then return nil end
-
-    -- 1. 取り巻き優先
-    for _, v in pairs(path:GetChildren()) do
-        if v.Name ~= "Leviathan" and v:FindFirstChild("Humanoid") and v.Humanoid.Health > 0 then
-            return v, false, (SETTINGS.SeaBeastY or 30)
-        end
-    end
-
-    -- 2. Leviathan本体
-    local levi = path:FindFirstChild("Leviathan") or workspace:FindFirstChild("Leviathan")
-    if levi then
-        local segment = levi:FindFirstChild("HumanoidRootPart") or levi:FindFirstChildWhichIsA("BasePart", true)
-        if segment then
-            return levi, false, (SETTINGS.SeaBeastY or 50)
-        end
-    end
-    return nil
-end
-
--- 🛠️ 安定化メインロジック
-task.spawn(function()
-    while true do
-        task.wait(0.1)
-
-        local char = player.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local hum = char and char:FindFirstChild("Humanoid")
-        
-        if not root or not hum then continue end
-
-        if State.Processing then
-            task.delay(5, function() State.Processing = false end)
-        end
-
-        -------------------------------------------------
-        -- 1. Frozen Heart 回収 (お前のコードそのまま)
-        -------------------------------------------------
-        if State.GetFrozenHeart and not State.Processing then
-            local heart = workspace:FindFirstChild("Frozen Heart", true) or 
-                          (workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("FrozenHeart"))
-            
-            if heart and heart:IsA("Model") then
-                State.Processing = true
-                local targetPos = heart:GetModelCFrame().p
-                
-                if type(stableTween) == "function" then
-                    stableTween(targetPos, SETTINGS.HuntTweenSpeed or 100)
-                else
-                    warn("stableTween 関数が見つかりません！")
-                end
-                
-                task.wait(1)
-                State.Processing = false
-            end
-        end
-
-        -------------------------------------------------
-        -- 2. Leviathan Gate (Tween ➡ 到着 ➡ ★BANG)
-        -------------------------------------------------
-        if State.AutoLeviathan and not State.Processing then
-            local gate = workspace:FindFirstChild("LeviathanGate", true) or 
-                         (workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("LeviathanGate"))
-            
-            if gate then
-                State.Processing = true
-                if hum.Sit then 
-                    hum.Sit = false 
-                    task.wait(0.3) 
-                    root.CFrame = root.CFrame + Vector3.new(0, 5, 0)
-                end
-                
-                local gatePos = gate:IsA("Model") and gate:GetModelCFrame().p or gate.Position
-                
-                if type(stableTween) == "function" then
-                    stableTween(gatePos, SETTINGS.HuntTweenSpeed or 100)
-                else
-                    warn("stableTween 関数が見つかりません！")
-                end
-                
-                task.wait(1)
-                
-                -- 💥 【ここを追加】ツイーンしたあとにBANG（密着固定）
-                local startTime = tick()
-                while tick() - startTime < 5 and State.AutoLeviathan do -- 5秒間張り付く
-                    if gate and root then
-                        root.CFrame = gate:IsA("Model") and gate:GetModelCFrame() or gate.CFrame
-                        root.Velocity = Vector3.new(0, 0, 0)
-                    end
-                    task.wait()
-                end
-                
-                State.Processing = false
-            end
-        end
-
-        -------------------------------------------------
-        -- 3. Leviathan Kill (攻撃ロジックにBANGを上書き)
-        -------------------------------------------------
-        local leviTarget, _, targetY = getLeviathanTarget()
-        if leviTarget and State.KillLeviathan and not State.Processing then
-            State.Processing = true
-            if hum.Sit then hum.Sit = false task.wait(0.3) end
-            forceEquipWeapon()
-
-            while isValid(leviTarget) and State.KillLeviathan and hum.Health > 0 do
-                local trp = leviTarget:FindFirstChild("HumanoidRootPart") or 
-                            leviTarget:FindFirstChildWhichIsA("BasePart", true)
-                
-                if root and trp then
-                    -- 💥 【ここを修正】targetYの固定座標ではなく、敵にピッタリBANG（密着）
-                    root.CFrame = trp.CFrame 
-                    root.Velocity = Vector3.new(0, 0, 0)
-                    spamSkills()
-                end
-                task.wait()
-            end
-            State.Processing = false
-        end
     end
 end)
 ---------------------------------
